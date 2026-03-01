@@ -1,0 +1,7 @@
+# Test for _Thread_local C11 support
+# Patterns from real-world code: tinycthread, logging libs, etc.
+workspace thread_local_test {
+	project thread_local_test {
+		file thread_local_test.c
+	}
+}
