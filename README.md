@@ -50,3 +50,23 @@ Avoid gratuitous code changes.
 Ensure that the tests continue to pass after your change.
 If you're fixing a bug or adding a feature related to the language, add a corresponding test case.
 * Before embarking on a large-scale contribution, please open a GitHub issue.
+
+## JSON REST API
+
+CScout now exposes a JSON REST API that provides structured access to its analysis
+results. This was added as part of a GSoC project to power a VS Code extension.
+All endpoints are served by the same embedded SWILL HTTP server on the same port.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/projects` | List all projects (`[{pid, name}]`) |
+| `GET /api/setproj?projid=N` | Set active project scope |
+| `GET /api/files` | Files in current project scope |
+| `GET /api/identifiers` | All identifiers with kind and unused flags |
+| `GET /api/functions` | All functions with static/defined flags |
+| `GET /api/filemetrics?id=FID` | Per-file metrics (lines, complexity, etc.) |
+| `GET /api/funlist?f=PTR&n=u` | Callers (`n=u`) or callees (`n=d`) of a function |
+| `GET /api/source?id=FID&ec=PTR` | Source lines where an identifier occurs in a file |
+
+Query parameters follow the same conventions as the existing HTML query pages.
+The `Content-Type` of all responses is `application/json`.

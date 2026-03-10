@@ -3500,6 +3500,564 @@ merge_tokens(char **argv)
 	exit(0);
 }
 
+// ─── JSON REST API helpers ────────────────────────────────────────────────────
+
+static void
+json_str(FILE *of, const char *s)
+{
+	fputc('"', of);
+	for (const char *p = s; *p; p++) {
+		switch (*p) {
+		case '"':  fputs("\\\"", of); break;
+		case '\\': fputs("\\\\", of); break;
+		case '\n': fputs("\\n", of);  break;
+		case '\r': fputs("\\r", of);  break;
+		case '\t': fputs("\\t", of);  break;
+		default:
+			if ((unsigned char)*p < 0x20)
+				fprintf(of, "\\u%04x", (unsigned char)*p);
+			else
+				fputc(*p, of);
+			break;
+		}
+	}
+	fputc('"', of);
+}
+
+static void json_str(FILE *of, const string &s) { json_str(of, s.c_str()); }
+static void json_key(FILE *of, const char *k)   { json_str(of, k); fputc(':', of); }
+static void json_obj_open(FILE *of)  { fputc('{', of); }
+static void json_obj_close(FILE *of) { fputc('}', of); }
+static void json_arr_open(FILE *of)  { fputc('[', of); }
+static void json_arr_close(FILE *of) { fputc(']', of); }
+static void json_comma(FILE *of)     { fputc(',', of); }
+
+static void json_int(FILE *of, const char *key, int val) {
+	json_key(of, key);
+	fprintf(of, "%d", val);
+}
+
+static void json_double(FILE *of, const char *key, double val) {
+	json_key(of, key);
+	fprintf(of, "%g", val);
+}
+
+static void json_bool(FILE *of, const char *key, bool val) {
+	json_key(of, key);
+	fputs(val ? "true" : "false", of);
+}
+
+static void json_str_field(FILE *of, const char *key, const char *val) {
+	json_key(of, key);
+	json_str(of, val);
+}
+
+static void json_str_field(FILE *of, const char *key, const string &val) {
+	json_str_field(of, key, val.c_str());
+}
+
+static void json_head(FILE *) {
+	swill_setheader("Content-Type", "application/json");
+}
+
+// ─── JSON REST API endpoint handlers ──────────────────────────────────────────
+
+// GET /api/projects — list all projects
+static int
+api_projects_page(FILE *of, void *)
+{
+	json_head(of);
+	json_arr_open(of);
+	bool first = true;
+	for (Attributes::size_type j = attr_end; j < Attributes::get_num_attributes(); j++) {
+		if (!first) json_comma(of);
+		first = false;
+		json_obj_open(of);
+		json_int(of, "pid", (int)j);
+		json_comma(of);
+		json_str_field(of, "name", Project::get_projname(j));
+		json_obj_close(of);
+	}
+	json_arr_close(of);
+	return 0;
+}
+
+// GET /api/setproj?projid=N — set current project scope
+static int
+api_setproj_page(FILE *of, void *)
+{
+	json_head(of);
+	if (!swill_getargs("i(projid)", &current_project)) {
+		fputs("{\"error\":\"Missing projid parameter\"}", of);
+		return 0;
+	}
+	json_obj_open(of);
+	json_bool(of, "ok", true);
+	json_comma(of);
+	json_int(of, "projid", (int)current_project);
+	json_obj_close(of);
+	return 0;
+}
+
+// GET /api/files?ro=0|1&writable=0|1&match=Y|L|... — file query returning JSON
+static int
+api_files_page(FILE *of, void *)
+{
+	json_head(of);
+	FileQuery query(of, Option::file_icase->get(), current_project);
+	if (!query.is_valid()) {
+		fputs("{\"error\":\"Invalid query\"}", of);
+		return 0;
+	}
+	json_arr_open(of);
+	bool first = true;
+	for (vector <Fileid>::iterator i = files.begin(); i != files.end(); i++) {
+		if (!query.eval(*i))
+			continue;
+		if (current_project && !Filedetails::get_attribute(*i, current_project))
+			continue;
+		if (!first) json_comma(of);
+		first = false;
+
+		string s(i->get_path());
+		string::size_type k = s.find_last_of("/\\");
+		string dir, fname;
+		if (k == string::npos) {
+			fname = s;
+		} else {
+			dir = s.substr(0, k + 1);
+			fname = s.substr(k + 1);
+		}
+
+		json_obj_open(of);
+		json_int(of, "fid", i->get_id());
+		json_comma(of);
+		json_str_field(of, "name", fname);
+		json_comma(of);
+		json_str_field(of, "dir", dir);
+		json_comma(of);
+		json_str_field(of, "path", s);
+		json_comma(of);
+		json_bool(of, "readonly", i->get_readonly());
+		json_obj_close(of);
+	}
+	json_arr_close(of);
+	return 0;
+}
+
+// GET /api/identifiers?qi=1&writable=1&match=Y|L&... — identifier query
+static int
+api_identifiers_page(FILE *of, void *)
+{
+	json_head(of);
+	IdQuery query(of, Option::file_icase->get(), current_project);
+	if (!query.is_valid()) {
+		fputs("{\"error\":\"Invalid query\"}", of);
+		return 0;
+	}
+
+	json_arr_open(of);
+	bool first = true;
+	for (IdProp::iterator i = ids.begin(); i != ids.end(); i++) {
+		if (!query.eval(*i))
+			continue;
+		if (!first) json_comma(of);
+		first = false;
+		Eclass *e = i->first;
+		const Identifier &id = i->second;
+		json_obj_open(of);
+		// Use pointer as opaque eid
+		fprintf(of, "\"eid\":\"%p\"", (void *)e);
+		json_comma(of);
+		json_str_field(of, "name", id.get_id());
+		json_comma(of);
+		json_int(of, "size", e->get_size());
+		json_comma(of);
+		json_bool(of, "readonly", e->get_attribute(is_readonly));
+		json_comma(of);
+		json_bool(of, "tag", e->get_attribute(is_suetag));
+		json_comma(of);
+		json_bool(of, "member", e->get_attribute(is_sumember));
+		json_comma(of);
+		json_bool(of, "macro", e->get_attribute(is_macro));
+		json_comma(of);
+		json_bool(of, "typedef", e->get_attribute(is_typedef));
+		json_comma(of);
+		json_bool(of, "function", e->get_attribute(is_cfunction));
+		json_comma(of);
+		json_bool(of, "cscope", e->get_attribute(is_cscope));
+		json_comma(of);
+		json_bool(of, "lscope", e->get_attribute(is_lscope));
+		json_comma(of);
+		json_bool(of, "unused", e->is_unused());
+		json_comma(of);
+		json_bool(of, "xfile", id.get_xfile());
+		json_obj_close(of);
+	}
+	json_arr_close(of);
+	return 0;
+}
+
+// GET /api/functions?qi=1&writable=1&match=Y|L&defined=1&... — function query
+static int
+api_functions_page(FILE *of, void *)
+{
+	json_head(of);
+	FunQuery query(of, Option::file_icase->get(), current_project);
+	if (!query.is_valid()) {
+		fputs("{\"error\":\"Invalid query\"}", of);
+		return 0;
+	}
+
+	json_arr_open(of);
+	bool first = true;
+	for (Call::const_fmap_iterator_type i = Call::fbegin(); i != Call::fend(); i++) {
+		if (!query.eval(i->second))
+			continue;
+		if (!first) json_comma(of);
+		first = false;
+		Call *f = i->second;
+		json_obj_open(of);
+		fprintf(of, "\"fid\":\"%p\"", (void *)f);
+		json_comma(of);
+		json_str_field(of, "name", f->get_name());
+		json_comma(of);
+		json_bool(of, "is_static", f->is_file_scoped());
+		json_comma(of);
+		json_bool(of, "is_defined", f->is_defined());
+		json_comma(of);
+		json_bool(of, "is_macro", f->is_macro());
+		json_comma(of);
+		json_int(of, "ncallers", f->get_num_caller());
+		json_comma(of);
+		json_int(of, "ncallees", f->get_num_call());
+		if (f->is_defined()) {
+			Tokid t = f->get_definition();
+			json_comma(of);
+			json_str_field(of, "file", t.get_fileid().get_path());
+			json_comma(of);
+			json_int(of, "line", Filedetails::get_line_number(
+			    t.get_fileid(), t.get_streampos()));
+			json_comma(of);
+			json_int(of, "file_id", t.get_fileid().get_id());
+		}
+		json_obj_close(of);
+	}
+	json_arr_close(of);
+	return 0;
+}
+
+// GET /api/file-metrics?id=N — file metrics as JSON
+static int
+api_file_metrics_page(FILE *of, void *)
+{
+	json_head(of);
+	int id;
+	if (!swill_getargs("i(id)", &id)) {
+		fputs("{\"error\":\"Missing id parameter\"}", of);
+		return 0;
+	}
+	Fileid fi(id);
+	json_obj_open(of);
+	json_int(of, "fid", id);
+	json_comma(of);
+	json_str_field(of, "path", fi.get_path());
+	json_comma(of);
+	json_bool(of, "readonly", fi.get_readonly());
+	json_comma(of);
+	json_key(of, "metrics");
+	json_arr_open(of);
+	bool first = true;
+	for (int j = 0; j < FileMetrics::metric_max; j++) {
+		if (!Metrics::is_file<FileMetrics>(j))
+			continue;
+		if (Metrics::is_internal<FileMetrics>(j))
+			continue;
+		if (!first) json_comma(of);
+		first = false;
+		json_obj_open(of);
+		json_str_field(of, "name", Metrics::get_name<FileMetrics>(j));
+		if (Metrics::is_pre_cpp<FileMetrics>(j)) {
+			json_comma(of);
+			json_double(of, "pre_cpp",
+			    Filedetails::get_pre_cpp_metrics(fi).get_metric(j));
+		}
+		if (Metrics::is_post_cpp<FileMetrics>(j)) {
+			json_comma(of);
+			json_double(of, "post_cpp",
+			    Filedetails::get_post_cpp_metrics(fi).get_metric(j));
+		}
+		json_obj_close(of);
+	}
+	json_arr_close(of);
+	json_obj_close(of);
+	return 0;
+}
+
+// GET /api/fun?f=PTR — function details as JSON
+static int
+api_fun_page(FILE *of, void *)
+{
+	json_head(of);
+	Call *f;
+	if (!swill_getargs("p(f)", &f)) {
+		fputs("{\"error\":\"Missing f parameter\"}", of);
+		return 0;
+	}
+	json_obj_open(of);
+	fprintf(of, "\"fid\":\"%p\"", (void *)f);
+	json_comma(of);
+	json_str_field(of, "name", f->get_name());
+	json_comma(of);
+	json_str_field(of, "type", f->entity_type_name());
+	json_comma(of);
+	json_bool(of, "is_defined", f->is_defined());
+	json_comma(of);
+	json_bool(of, "is_declared", f->is_declared());
+	json_comma(of);
+	json_bool(of, "is_static", f->is_file_scoped());
+	json_comma(of);
+	json_bool(of, "is_macro", f->is_macro());
+	json_comma(of);
+	json_int(of, "ncallers", f->get_num_caller());
+	json_comma(of);
+	json_int(of, "ncallees", f->get_num_call());
+
+	if (f->is_declared()) {
+		Tokid t = f->get_tokid();
+		json_comma(of);
+		json_key(of, "declaration");
+		json_obj_open(of);
+		json_str_field(of, "file", t.get_fileid().get_path());
+		json_comma(of);
+		json_int(of, "file_id", t.get_fileid().get_id());
+		json_comma(of);
+		json_int(of, "line", Filedetails::get_line_number(
+		    t.get_fileid(), t.get_streampos()));
+		json_obj_close(of);
+	}
+	if (f->is_defined()) {
+		Tokid t = f->get_definition();
+		json_comma(of);
+		json_key(of, "definition");
+		json_obj_open(of);
+		json_str_field(of, "file", t.get_fileid().get_path());
+		json_comma(of);
+		json_int(of, "file_id", t.get_fileid().get_id());
+		json_comma(of);
+		json_int(of, "line", Filedetails::get_line_number(
+		    t.get_fileid(), t.get_streampos()));
+		json_obj_close(of);
+	}
+
+	// Metrics
+	json_comma(of);
+	json_key(of, "metrics");
+	json_obj_open(of);
+	json_key(of, "pre_cpp");
+	json_obj_open(of);
+	{
+		bool pfirst = true;
+		for (int j = 0; j < FunMetrics::metric_max; j++) {
+			if (Metrics::is_internal<FunMetrics>(j))
+				continue;
+			if (!Metrics::is_pre_cpp<FunMetrics>(j))
+				continue;
+			if (!pfirst) json_comma(of);
+			pfirst = false;
+			json_double(of, Metrics::get_name<FunMetrics>(j).c_str(),
+			    f->get_pre_cpp_const_metrics().get_metric(j));
+		}
+	}
+	json_obj_close(of);
+	json_comma(of);
+	json_key(of, "post_cpp");
+	json_obj_open(of);
+	{
+		bool mfirst = true;
+		for (int j = 0; j < FunMetrics::metric_max; j++) {
+			if (Metrics::is_internal<FunMetrics>(j))
+				continue;
+			if (!Metrics::is_post_cpp<FunMetrics>(j))
+				continue;
+			if (!mfirst) json_comma(of);
+			mfirst = false;
+			json_double(of, Metrics::get_name<FunMetrics>(j).c_str(),
+			    f->get_post_cpp_const_metrics().get_metric(j));
+		}
+	}
+	json_obj_close(of);
+	json_obj_close(of);
+
+	json_obj_close(of);
+	return 0;
+}
+
+// GET /api/funlist?f=PTR&n=u|d — callers/callees list as JSON
+static int
+api_funlist_page(FILE *of, void *)
+{
+	json_head(of);
+	Call *f;
+	char *ltype = swill_getvar("n");
+	if (!swill_getargs("p(f)", &f) || !ltype) {
+		fputs("{\"error\":\"Missing f or n parameter\"}", of);
+		return 0;
+	}
+
+	// Select caller vs callee iterators
+	Call::const_fiterator_type (Call::*fbegin)() const;
+	Call::const_fiterator_type (Call::*fend)() const;
+	switch (*ltype) {
+	case 'u': case 'U':
+		fbegin = &Call::caller_begin;
+		fend = &Call::caller_end;
+		break;
+	case 'd': case 'D':
+		fbegin = &Call::call_begin;
+		fend = &Call::call_end;
+		break;
+	default:
+		fputs("{\"error\":\"Invalid n parameter (use u or d)\"}", of);
+		return 0;
+	}
+
+	json_arr_open(of);
+	bool first = true;
+	Call::const_fiterator_type i;
+	for (i = (f->*fbegin)(); i != (f->*fend)(); i++) {
+		// Skip self-reference for callers
+		if ((*ltype == 'u' || *ltype == 'U') && *i == f)
+			continue;
+		if (!first) json_comma(of);
+		first = false;
+		json_obj_open(of);
+		fprintf(of, "\"fid\":\"%p\"", (void *)*i);
+		json_comma(of);
+		json_str_field(of, "name", (*i)->get_name());
+		json_comma(of);
+		json_bool(of, "is_static", (*i)->is_file_scoped());
+		json_comma(of);
+		json_bool(of, "is_macro", (*i)->is_macro());
+		json_obj_close(of);
+	}
+	json_arr_close(of);
+	return 0;
+}
+
+// GET /api/id?id=EID — identifier details as JSON
+static int
+api_id_page(FILE *of, void *)
+{
+	json_head(of);
+	Eclass *e;
+	if (!swill_getargs("p(id)", &e)) {
+		fputs("{\"error\":\"Missing id parameter\"}", of);
+		return 0;
+	}
+	Identifier &id = ids[e];
+	json_obj_open(of);
+	fprintf(of, "\"eid\":\"%p\"", (void *)e);
+	json_comma(of);
+	json_str_field(of, "name", id.get_id());
+	json_comma(of);
+	json_int(of, "size", e->get_size());
+	json_comma(of);
+	json_bool(of, "readonly", e->get_attribute(is_readonly));
+	json_comma(of);
+	json_bool(of, "unused", e->is_unused());
+	json_comma(of);
+	json_bool(of, "xfile", id.get_xfile());
+
+	// Attribute flags
+	json_comma(of);
+	json_key(of, "attributes");
+	json_obj_open(of);
+	{
+		bool afirst = true;
+		for (int i = attr_begin; i < attr_end; i++) {
+			if (!afirst) json_comma(of);
+			afirst = false;
+			json_bool(of, Attributes::name(i).c_str(),
+			    e->get_attribute(i));
+		}
+	}
+	json_obj_close(of);
+
+	// Projects this identifier appears in
+	json_comma(of);
+	json_key(of, "projects");
+	json_arr_open(of);
+	{
+		bool pfirst = true;
+		for (Attributes::size_type j = attr_end; j < Attributes::get_num_attributes(); j++) {
+			if (e->get_attribute(j)) {
+				if (!pfirst) json_comma(of);
+				pfirst = false;
+				json_str(of, Project::get_projname(j));
+			}
+		}
+	}
+	json_arr_close(of);
+
+	json_obj_close(of);
+	return 0;
+}
+
+// GET /api/source?id=FID&ec=EID — source tokens for an identifier in a file
+static int
+api_source_page(FILE *of, void *)
+{
+	json_head(of);
+	int fid;
+	Eclass *ec = NULL;
+	char *eid_str = swill_getvar("ec");
+	if (!swill_getargs("i(id)", &fid)) {
+		fputs("{\"error\":\"Missing id parameter\"}", of);
+		return 0;
+	}
+	// Parse ec as a pointer if provided
+	if (eid_str) {
+		void *ptr;
+		if (sscanf(eid_str, "%p", &ptr) == 1)
+			ec = (Eclass *)ptr;
+	}
+
+	Fileid fi(fid);
+	json_obj_open(of);
+	json_int(of, "fid", fid);
+	json_comma(of);
+	json_str_field(of, "path", fi.get_path());
+	json_comma(of);
+	json_key(of, "matches");
+	json_arr_open(of);
+
+	// If an EC was specified, find lines where it occurs in this file
+	if (ec) {
+		bool first = true;
+		for (mapTokidEclass::iterator mi = Tokid::begin_ec(); mi != Tokid::end_ec(); mi++) {
+			if (mi->first.get_fileid() != fi)
+				continue;
+			if (mi->second == ec) {
+				if (!first) json_comma(of);
+				first = false;
+				int lnum = Filedetails::get_line_number(
+				    fi, mi->first.get_streampos());
+				json_obj_open(of);
+				json_int(of, "line", lnum);
+				json_comma(of);
+				json_int(of, "col", 0);
+				json_obj_close(of);
+			}
+		}
+	}
+	json_arr_close(of);
+	json_obj_close(of);
+	return 0;
+}
+
+// ─── End JSON REST API ────────────────────────────────────────────────────────
+
 int
 main(int argc, char *argv[])
 {
@@ -3782,6 +4340,18 @@ main(int argc, char *argv[])
 		swill_handle("setproj.html", set_project_page, NULL);
 		swill_handle("logo.png", logo_page, NULL);
 		swill_handle("index.html", index_page, 0);
+
+		// JSON REST API endpoints
+		swill_handle("api/projects", api_projects_page, NULL);
+		swill_handle("api/setproj", api_setproj_page, NULL);
+		swill_handle("api/files", api_files_page, NULL);
+		swill_handle("api/identifiers", api_identifiers_page, NULL);
+		swill_handle("api/functions", api_functions_page, NULL);
+		swill_handle("api/filemetrics", api_file_metrics_page, NULL);
+		swill_handle("api/fun", api_fun_page, NULL);
+		swill_handle("api/funlist", api_funlist_page, NULL);
+		swill_handle("api/id", api_id_page, NULL);
+		swill_handle("api/source", api_source_page, NULL);
 	}
 
 
