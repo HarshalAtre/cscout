@@ -630,9 +630,13 @@ Tbasic::merge(Tbasic *b)
 	enum e_sign s;
 	enum e_storage_class c;
 	enum e_qualifier q;
+	enum e_storage_class lhs_sc;
+	enum e_storage_class rhs_sc;
 
 	if (b == NULL)
 		return Type_node::merge(b);
+	lhs_sc = this->sclass.get_storage_class();
+	rhs_sc = b->sclass.get_storage_class();
 	if (this->type == b_abstract || this->type == b_undeclared)
 		t = b->type;
 	else if (b->type == b_abstract || b->type == b_undeclared)
@@ -686,18 +690,29 @@ Tbasic::merge(Tbasic *b)
 		s = s_none;
 	}
 
-	if (this->sclass.get_storage_class() == c_unspecified)
-		c = b->sclass.get_storage_class();
-	else if (b->sclass.get_storage_class() == c_unspecified)
-		c = this->sclass.get_storage_class();
-	else {
+	if (lhs_sc == c_unspecified)
+		c = rhs_sc;
+	else if (rhs_sc == c_unspecified)
+		c = lhs_sc;
+	else if (lhs_sc == c_thread_local && rhs_sc == c_thread_local) {
+		Error::error(E_ERR, "conflicting storage duration specifiers");
+		c = lhs_sc;
+	} else if (lhs_sc == c_thread_local && (rhs_sc == c_static || rhs_sc == c_extern))
+		c = rhs_sc;
+	else if (rhs_sc == c_thread_local && (lhs_sc == c_static || lhs_sc == c_extern))
+		c = lhs_sc;
+	else if ((lhs_sc == c_thread_local && (rhs_sc == c_auto || rhs_sc == c_register)) ||
+	    (rhs_sc == c_thread_local && (lhs_sc == c_auto || lhs_sc == c_register))) {
+		Error::error(E_ERR, "conflicting storage duration specifiers");
+		c = (lhs_sc == c_thread_local) ? rhs_sc : lhs_sc;
+	} else {
 		/*
 		 * @error
 		 * More than one storage class was given for the same
 		 * object
 		 */
 		Error::error(E_ERR, "at most one storage class can be specified");
-		c = this->sclass.get_storage_class();
+		c = lhs_sc;
 	}
 
 	q = (enum e_qualifier)(this->get_qualifiers() | b->get_qualifiers());
@@ -1016,19 +1031,31 @@ void
 Tstorage::set_storage_class(Type t)
 {
 	enum e_storage_class newclass = t.get_storage_class();
+	bool thread_local_pair =
+	    (sclass == c_thread_local && (newclass == c_static || newclass == c_extern)) ||
+	    (newclass == c_thread_local && (sclass == c_static || sclass == c_extern));
+	bool invalid_thread_local_pair =
+	    (sclass == c_thread_local && (newclass == c_auto || newclass == c_register)) ||
+	    (newclass == c_thread_local && (sclass == c_auto || sclass == c_register));
 
 	if (DP()) {
 		cout << "Set_storage_class of ";
 		this->print(cout);
 		cout << "\nto " << t << endl;
 	}
-	if (sclass == newclass)
+	if (sclass == newclass) {
+		if (sclass == c_thread_local)
+			Error::error(E_ERR, "conflicting storage duration specifiers");
 		return;
+	}
+	if (invalid_thread_local_pair)
+		Error::error(E_ERR, "conflicting storage duration specifiers");
 	if (sclass != c_unspecified &&
 	    sclass != c_typedef &&
 	    newclass != c_unspecified &&
 	    // new static overrides previous extern 6.2.2-4
-	    !(sclass == c_extern && newclass == c_static))
+	    !(sclass == c_extern && newclass == c_static) &&
+	    !thread_local_pair)
 		/*
 		 * @error
 		 * Incompatible storage classes were specified in a single
@@ -1038,7 +1065,8 @@ Tstorage::set_storage_class(Type t)
 	// if sclass is already e.g. extern and t is just volatile don't destroy sclass
 	// also a subsequent static overrides an previous extern declaration 6.2.2-4
 	if (sclass == c_unspecified || sclass == c_typedef ||
-	    (sclass == c_extern && newclass == c_static))
+	    (sclass == c_extern && newclass == c_static) ||
+	    (sclass == c_thread_local && (newclass == c_static || newclass == c_extern)))
 		sclass = newclass;
 }
 
